@@ -1,10 +1,10 @@
 import io
-import os
+from fastapi.middleware.cors import CORSMiddleware
 import zipfile
 from pathlib import Path
 import tempfile
 from yt_dlp import YoutubeDL
-from fastapi import FastAPI, Body, HTTPException, Query, Depends
+from fastapi import FastAPI, HTTPException, Query, Depends
 from fastapi.responses import StreamingResponse 
 import logging
 import redis.asyncio as redis
@@ -26,6 +26,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
+
+app.add_middleware(
+  CORSMiddleware,
+  allow_origins=["*"],  # For development only
+  allow_credentials=True,
+  allow_methods=["*"],
+  allow_headers=["*"],
+  expose_headers=['Content-Disposition']
+)
 
 def clean_filename(filename: str) -> str: 
   cleaned = re.sub(r'[\\/*?:"<>|]', "", filename)[:150]
