@@ -1,2 +1,14 @@
 venv
 downloader.log
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Temporary files
+temp_downloads/
+logs/
+
+# Virtual environment
+venv/

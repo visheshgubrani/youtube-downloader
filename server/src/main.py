@@ -233,7 +233,7 @@ async def download_playlist(url: str = Query(..., title='url'), background_tasks
     logger.error(f'Playlist download failed: {str(e)}')
     raise HTTPException(500, f'Playlist download failed: {str(e)}')
     
-app.get('/status')
+@app.get('/status')
 async def status():
   return {'status': 'running'}
 
