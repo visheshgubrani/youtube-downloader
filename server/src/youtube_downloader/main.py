@@ -1,35 +1,28 @@
-from fastapi.middleware.cors import CORSMiddleware
+import asyncio
 import zipfile
-from pathlib import Path
 import shutil
-from yt_dlp import YoutubeDL
+import urllib.parse
+
 from fastapi import FastAPI, HTTPException, Query, Depends, BackgroundTasks
 from fastapi.responses import FileResponse
-import logging
+from fastapi.middleware.cors import CORSMiddleware
 import redis.asyncio as redis
 from fastapi_limiter import FastAPILimiter
 from fastapi_limiter.depends import RateLimiter
-import re 
-import urllib.parse
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
-import os
 
-# Set up logging
-logging.basicConfig(
-  level=logging.INFO,
-  format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-  handlers=[
-    logging.FileHandler('downloader.log'),
-  ]
-)
+from .config import DOWNLOAD_DIR, RATE_LIMIT_SECONDS, RATE_LIMIT_TIMES, MAX_PLAYLIST_TRACKS
+from .utils import clean_filename, remove_temp_dir
+from .downloader import download_media, get_ytdl_options, get_playlist_info, executor
 
-# Disable watchfiles logger
-logging.getLogger('watchfiles').setLevel(logging.ERROR)
-
+# Set up logger
+import logging
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
+app = FastAPI(
+  title='YouTube to MP3 Downloader API',
+  description='API for downloading YouTube videos and playlists as MP3s',
+  version='0.1.0'
+)
 
 app.add_middleware(
   CORSMiddleware,
@@ -40,15 +33,6 @@ app.add_middleware(
   expose_headers=['Content-Disposition']
 )
 
-DOWNLOADS_DIR = Path('./temp_downloads')
-DOWNLOADS_DIR.mkdir(exist_ok=True)
-
-executor = ThreadPoolExecutor(max_workers=5)
-
-def clean_filename(filename: str) -> str: 
-  cleaned = re.sub(r'[\\/*?:"<>|]', "", filename)[:150]
-  return cleaned.encode('ascii', errors='ignore').decode().strip()
-
 @app.on_event('startup')
 async def startup():
   redis_connection = redis.from_url('redis://localhost:6379')
@@ -57,8 +41,8 @@ async def startup():
 @app.on_event('shutdown')
 async def shutdown_event():
   # Clean up temp downloads dir
-  if DOWNLOADS_DIR.exists():
-    for file in DOWNLOADS_DIR.glob('*'):
+  if DOWNLOAD_DIR.exists():
+    for file in DOWNLOAD_DIR.glob('*'):
       try:
         if file.is_dir():
           shutil.rmtree(file, ignore_errors=True)
@@ -70,51 +54,14 @@ async def shutdown_event():
   logger.info("Application shutdown, cleaned up temp files")
 
 
-# Download Configuraiton
-def get_ytdl_options(output_dir: str):
-  return {
-    "format": "bestaudio/best",
-    "postprocessors": [
-        {  # Extract audio as MP3
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "0",  # Highest quality
-        },
-        {  # Add metadata
-            "key": "FFmpegMetadata"
-        },
-        {  # Embed thumbnail
-            "key": "EmbedThumbnail",
-            "already_have_thumbnail": False
-        }
-      ],
-      "writethumbnail": True,  # Write thumbnail to disk
-      "outtmpl": f"{output_dir}/%(title)s.%(ext)s",  # Output template
-      "quiet": True
-  }
-
-# func to execute download in a thread
-def download_media(url, options):
-  with YoutubeDL(options) as ydl:
-    return ydl.extract_info(url, download=True)
-
-# Backgroud task to clean up a file after it's been served
-def remove_temp_dir(temp_dir_path: str):
-  try:
-    if os.path.exists(temp_dir_path):
-      shutil.rmtree(temp_dir_path, ignore_errors=True)
-      logger.info(f'Cleaned up tmep file: {temp_dir_path}')
-  except Exception as e:
-    logger.error(f'Error removing tmep file: {temp_dir_path}: {e}')
-
-@app.get('/download', dependencies=[Depends(RateLimiter(times=5, seconds=60))])
+@app.get('/download', dependencies=[Depends(RateLimiter(times=RATE_LIMIT_TIMES, seconds=RATE_LIMIT_SECONDS))])
 async def download_single_mp3(url: str = Query(..., title='url'), background_tasks: BackgroundTasks = None):
   logger.info(f'Single download request received for url" {url}')
   if not url:
     raise HTTPException(status_code=400, detail='Invalid YT URL')
   
   download_id = f"{int(asyncio.get_event_loop().time() * 1000)}"
-  temp_dir = DOWNLOADS_DIR / download_id
+  temp_dir = DOWNLOAD_DIR / download_id
   temp_dir.mkdir(exist_ok=True)
   
   
@@ -166,29 +113,28 @@ async def download_single_mp3(url: str = Query(..., title='url'), background_tas
     logger.error(f"Single download failed: {str(e)}")
     raise HTTPException(status_code=500, detail=f'Download Failed: {str(e)}')
 
-@app.get('/download/playlist', dependencies=[Depends(RateLimiter(times=5, seconds=60))])
+@app.get('/download/playlist', dependencies=[Depends(RateLimiter(times=RATE_LIMIT_TIMES, seconds=RATE_LIMIT_SECONDS))])
 async def download_playlist(url: str = Query(..., title='url'), background_tasks: BackgroundTasks = None):
   logger.info(f'Playlist download request received for url: {url}')
 
   # Create a unique temp dir
   download_id = f'{int(asyncio.get_event_loop().time() * 1000)}'
-  temp_dir = DOWNLOADS_DIR / download_id
+  temp_dir = DOWNLOAD_DIR / download_id
   temp_dir.mkdir(exist_ok=True)
   
   try:
     # Get the playlist info
     loop = asyncio.get_event_loop()
 
-    info = await loop.run_in_executor(executor, lambda: YoutubeDL({'quiet': True}).extract_info(url, download=False))
+    info = await loop.run_in_executor(executor, lambda: get_playlist_info(url))
     
     if 'entries' not in info:
       logger.warning(f'Non-Playlist URL sent to playlist endpoint: {url}')
       raise HTTPException(400, 'Use single endpoint for single videos')
             
     playlist_title = clean_filename(info.get('title', 'playlist'))
-    max_tracks = 50
     num_tracks = len(info['entries'])
-    logger.info(f'processing playlist: {playlist_title} with {num_tracks} tracks (max {max_tracks})')
+    logger.info(f'processing playlist: {playlist_title} with {num_tracks} tracks (max {MAX_PLAYLIST_TRACKS})')
 
     # Download the playlist
     await loop.run_in_executor(
@@ -204,7 +150,7 @@ async def download_playlist(url: str = Query(..., title='url'), background_tasks
 
 
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-      for idx, mp3_file in enumerate(mp3_files[:max_tracks]):
+      for idx, mp3_file in enumerate(mp3_files[:MAX_PLAYLIST_TRACKS]):
         zip_file.write(mp3_file, arcname=mp3_file.name)
 
     logger.info(f'Playlist {playlist_title} packaged with {len(mp3_files)} tracks')

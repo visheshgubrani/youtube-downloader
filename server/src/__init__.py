@@ -1,3 +1,0 @@
-"""
-YouTube Downloader package
-""" 
