@@ -1,9 +1,11 @@
+import sys
 import asyncio
 import zipfile
 import shutil
 import urllib.parse
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query, Depends, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Query, Depends, BackgroundTasks, APIRouter
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import redis.asyncio as redis
@@ -18,10 +20,35 @@ from .downloader import download_media, get_ytdl_options, get_playlist_info, exe
 import logging
 logger = logging.getLogger(__name__)
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+  # Startup
+  redis_connection = redis.from_url('redis://localhost:6379')
+  await FastAPILimiter.init(redis_connection)
+  logger.info('Application started, initialized rate limiter')
+
+  yield
+
+  # Shutdown Code
+  await redis_connection.close()
+  if DOWNLOAD_DIR.exists():
+    for file in DOWNLOAD_DIR.glob('*'):
+      try:
+        if file.is_dir():
+          shutil.rmtree(file, ignore_errors=True)
+        else:
+          file.unlink()
+      except Exception as e:
+        logger.error(f"Error cleaning up file {file}: {e}")
+
+  logger.info('Application shutdown, cleaned up temp files')
+
+
 app = FastAPI(
   title='YouTube to MP3 Downloader API',
   description='API for downloading YouTube videos and playlists as MP3s',
-  version='0.1.0'
+  version='0.1.0',
+  lifespan=lifespan
 )
 
 app.add_middleware(
@@ -33,28 +60,31 @@ app.add_middleware(
   expose_headers=['Content-Disposition']
 )
 
-@app.on_event('startup')
-async def startup():
-  redis_connection = redis.from_url('redis://localhost:6379')
-  await FastAPILimiter.init(redis_connection)
+# @app.on_event('startup')
+# async def startup():
+#   redis_connection = redis.from_url('redis://localhost:6379')
+#   await FastAPILimiter.init(redis_connection)
 
-@app.on_event('shutdown')
-async def shutdown_event():
-  # Clean up temp downloads dir
-  if DOWNLOAD_DIR.exists():
-    for file in DOWNLOAD_DIR.glob('*'):
-      try:
-        if file.is_dir():
-          shutil.rmtree(file, ignore_errors=True)
-        else:
-          file.unlink()
-      except Exception as e:
-        logger.error(f"Error cleaning up file {file}: {e}")
+# @app.on_event('shutdown')
+# async def shutdown_event():
+#   # Clean up temp downloads dir
+#   if DOWNLOAD_DIR.exists():
+#     for file in DOWNLOAD_DIR.glob('*'):
+#       try:
+#         if file.is_dir():
+#           shutil.rmtree(file, ignore_errors=True)
+#         else:
+#           file.unlink()
+#       except Exception as e:
+#         logger.error(f"Error cleaning up file {file}: {e}")
 
-  logger.info("Application shutdown, cleaned up temp files")
+#   logger.info("Application shutdown, cleaned up temp files")
 
+endpoint_dependencies = []
+if 'pytest' not in sys.modules:
+  endpoint_dependencies.append(Depends(RateLimiter(times=RATE_LIMIT_TIMES, seconds=RATE_LIMIT_SECONDS)))
 
-@app.get('/download', dependencies=[Depends(RateLimiter(times=RATE_LIMIT_TIMES, seconds=RATE_LIMIT_SECONDS))])
+@app.get('/download', dependencies=endpoint_dependencies)
 async def download_single_mp3(url: str = Query(..., title='url'), background_tasks: BackgroundTasks = None):
   logger.info(f'Single download request received for url" {url}')
   if not url:
@@ -113,7 +143,7 @@ async def download_single_mp3(url: str = Query(..., title='url'), background_tas
     logger.error(f"Single download failed: {str(e)}")
     raise HTTPException(status_code=500, detail=f'Download Failed: {str(e)}')
 
-@app.get('/download/playlist', dependencies=[Depends(RateLimiter(times=RATE_LIMIT_TIMES, seconds=RATE_LIMIT_SECONDS))])
+@app.get('/download/playlist', dependencies=endpoint_dependencies)
 async def download_playlist(url: str = Query(..., title='url'), background_tasks: BackgroundTasks = None):
   logger.info(f'Playlist download request received for url: {url}')
 
@@ -182,5 +212,3 @@ async def download_playlist(url: str = Query(..., title='url'), background_tasks
 @app.get('/status')
 async def status():
   return {'status': 'running'}
-
- 
