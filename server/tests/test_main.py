@@ -9,6 +9,11 @@ from src.youtube_downloader.downloader import download_media, get_playlist_info
 def client():
   return TestClient(app)
 
+def test_read_main(client):
+    response = client.get("/status")
+    assert response.status_code == 200
+    assert response.json() == {"status": "running"}
+
 @pytest.mark.asyncio
 async def test_download_single_mp3(client):
   test_url = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
@@ -43,3 +48,4 @@ async def test_download_playlist(client):
   
   assert response.status_code == 200
   assert response.headers['content-type'] == 'application/zip'
+

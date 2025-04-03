@@ -12,7 +12,7 @@ import redis.asyncio as redis
 from fastapi_limiter import FastAPILimiter
 from fastapi_limiter.depends import RateLimiter
 
-from .config import DOWNLOAD_DIR, RATE_LIMIT_SECONDS, RATE_LIMIT_TIMES, MAX_PLAYLIST_TRACKS
+from .config import DOWNLOAD_DIR, RATE_LIMIT_SECONDS, RATE_LIMIT_TIMES, MAX_PLAYLIST_TRACKS, REDIS_URL
 from .utils import clean_filename, remove_temp_dir
 from .downloader import download_media, get_ytdl_options, get_playlist_info, executor
 
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
   # Startup
-  redis_connection = redis.from_url('redis://localhost:6379')
+  redis_connection = redis.from_url(REDIS_URL)
   await FastAPILimiter.init(redis_connection)
   logger.info('Application started, initialized rate limiter')
 
